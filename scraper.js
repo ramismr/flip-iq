@@ -314,13 +314,12 @@ function passesBusinessRules(listing) {
   return pricePerSqm < MAX_PRICE_PER_SQM;
 }
 
-function escapeTelegramMarkdown(text) {
-  return String(text).replace(/([_*[\]()~`>#+\-=|{}.!\\])/g, '\\$1');
-}
-
-function escapeTelegramUrl(url) {
-  // Escapăm absolut orice caracter special din URL (inclusiv puncte, cratime, paranteze)
-  return String(url).replace(/([_*[\]()~`>#+\-=|{}.!\\])/g, '\\$1');
+// Curățăm textul pentru a nu strica tag-urile HTML specifice Telegram
+function escapeHtml(text) {
+  return String(text)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
 }
 
 function formatPrice(num) {
@@ -330,17 +329,17 @@ function formatPrice(num) {
 function buildAlertMessage(listing) {
   const pricePerSqm = listing.price / listing.surface;
 
+  // Re-introducem link-ul curat pe textul "Vezi anunțul", acum complet protejat prin formatarea HTML
   return [
-    '🏠 *Oportunitate imobiliară\\!*',
+    '🏢 <b>Oportunitate imobiliară!</b>',
     '',
-    `📌 *Titlu:* ${escapeTelegramMarkdown(listing.title)}`,
-    `💰 *Preț total:* ${formatPrice(listing.price)} €`,
-    `📐 *Suprafață:* ${formatPrice(listing.surface)} m²`,
-    `📊 *Preț/mp:* ${formatPrice(Math.round(pricePerSqm))} €/m²`,
+    `📌 <b>Titlu:</b> ${escapeHtml(listing.title)}`,
+    `💰 <b>Preț total:</b> ${formatPrice(listing.price)} €`,
+    `📐 <b>Suprafață:</b> ${formatPrice(listing.surface)} m²`,
+    `📊 <b>Preț/mp:</b> ${formatPrice(Math.round(pricePerSqm))} €/m²`,
+    `📍 <b>Sursa:</b> ${escapeHtml(listing.platform)} | ${escapeHtml(listing.location)}`,
     '',
-    `🔗 [Vezi anunțul](${escapeTelegramUrl(listing.url)})`,
-    '',
-    `📍 ${escapeTelegramMarkdown(listing.platform)} \\| ${escapeTelegramMarkdown(listing.location)}`,
+    `🔗 <a href="${listing.url}"><b>Vezi anunțul aici</b></a>`
   ].join('\n');
 }
 
@@ -563,8 +562,9 @@ async function scrapeTarget(target) {
 }
 
 async function sendTelegramAlert(bot, chatId, listing) {
+  // Schimbat parse_mode în HTML pentru stabilitate maximă
   await bot.sendMessage(chatId, buildAlertMessage(listing), {
-    parse_mode: 'MarkdownV2',
+    parse_mode: 'HTML',
     disable_web_page_preview: false,
   });
 }
@@ -581,7 +581,7 @@ async function main() {
       console.log(`[${target.platform}] ${target.location}: ${results.length} anunțuri găsite`);
 
       for (const listing of results) {
-        if (!globalSeen.has(listing.url)) {
+        if (listing && listing.url && !globalSeen.has(listing.url)) {
           globalSeen.add(listing.url);
           allListings.push(listing);
         }
