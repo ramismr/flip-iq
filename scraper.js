@@ -319,7 +319,8 @@ function escapeTelegramMarkdown(text) {
 }
 
 function escapeTelegramUrl(url) {
-  return String(url).replace(/([_ *[\]()~`>#+\-=|{}.!\\])/g, '\\$1');
+  // Escapăm absolut orice caracter special din URL (inclusiv puncte, cratime, paranteze)
+  return String(url).replace(/([_*[\]()~`>#+\-=|{}.!\\])/g, '\\$1');
 }
 
 function formatPrice(num) {
@@ -460,11 +461,11 @@ async function scrapeOlx(target) {
               price: OLX_PARAMS_PRICE(offer.params) || offer.promotion?.price,
               params: offer.params,
               description: offer.description,
-          },
-          meta,
-        );
+            },
+            meta,
+          );
 
-        if (normalized && !seen.has(normalized.url)) {
+          if (normalized && !seen.has(normalized.url)) {
             seen.add(normalized.url);
             listings.push(normalized);
           }
