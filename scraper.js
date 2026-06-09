@@ -136,15 +136,15 @@ function extractPriceEur(...parts) {
 
 function normalizeListingUrl(url, baseUrl) {
   if (!url) return null;
-  if (url.startsWith('http')) return url.split('?')[0];
-  if (url.startsWith('//')) return `https:${url.split('?')[0]}`;
-  if (url.startsWith('/')) return new URL(url, baseUrl).href.split('?')[0];
-  return new URL(url, baseUrl).href.split('?')[0];
+  let cleaned = url.split('?')[0];
+  if (cleaned.startsWith('http')) return cleaned;
+  if (cleaned.startsWith('//')) return `https:${cleaned}`;
+  if (cleaned.startsWith('/')) return new URL(cleaned, baseUrl).href;
+  return new URL(cleaned, baseUrl).href;
 }
 
 function extractPriceFromObject(obj) {
   if (!obj) return null;
-
   if (typeof obj === 'number') return obj;
   if (typeof obj === 'string') return extractPriceEur(obj);
 
@@ -163,20 +163,15 @@ function extractPriceFromObject(obj) {
   return parseNumber(obj);
 }
 
+// Verifică structuri JSON-LD complexe sau parametri pentru suprafață
 function extractSurfaceFromObject(obj) {
   if (!obj) return null;
   if (typeof obj === 'number') return obj;
   if (typeof obj === 'string') return extractSurfaceFromText(obj);
 
   const keys = [
-    'area',
-    'surface',
-    'size',
-    'usableArea',
-    'areaInSquareMeters',
-    'livingArea',
-    'totalArea',
-    'value',
+    'area', 'surface', 'size', 'usableArea', 
+    'areaInSquareMeters', 'livingArea', 'totalArea', 'value'
   ];
 
   for (const key of keys) {
@@ -195,7 +190,7 @@ function isListingCandidate(obj) {
   const title = obj.title || obj.name || obj.adTitle || obj.heading;
   const url = obj.url || obj.link || obj.href || obj.slug || obj.path;
   const price =
-    extractPriceFromObject(obj.totalPrice) ||
+    extractPriceFromObject(raw => raw.totalPrice) ||
     extractPriceFromObject(obj.price) ||
     extractPriceFromObject(obj.priceValue) ||
     extractPriceFromObject(obj.priceAmount);
@@ -209,6 +204,11 @@ function normalizeRawListing(raw, meta) {
     raw.url || raw.link || raw.href || raw.slug || raw.path,
     meta.baseUrl,
   );
+
+  // Evităm din start rutele invalide/mecanice generate de NextJS-ul Storia
+  if (!url || url.includes('[lang]') || url.includes('[hpr]') || url.includes('/undefined')) {
+    return null;
+  }
 
   let price =
     extractPriceFromObject(raw.totalPrice) ||
@@ -250,7 +250,6 @@ function normalizeRawListing(raw, meta) {
 
 function OLX_PARAMS_SURFACE(params) {
   if (!Array.isArray(params)) return null;
-
   for (const param of params) {
     const key = String(param.key || '').toLowerCase();
     if (['surface', 'm', 'area', 'suprafata', 'suprafata_utila'].includes(key)) {
@@ -258,13 +257,11 @@ function OLX_PARAMS_SURFACE(params) {
       if (val && val >= 8 && val <= 500) return val;
     }
   }
-
   return null;
 }
 
 function OLX_PARAMS_PRICE(params) {
   if (!Array.isArray(params)) return null;
-
   for (const param of params) {
     if (param.key === 'price' && param.value) {
       const currency = String(param.value.currency || 'EUR').toUpperCase();
@@ -275,7 +272,6 @@ function OLX_PARAMS_PRICE(params) {
       return value;
     }
   }
-
   return null;
 }
 
@@ -290,13 +286,9 @@ function collectListingsFromJson(node, results, seen, depth = 0) {
   if (typeof node !== 'object') return;
 
   if (isListingCandidate(node)) {
-    const key = JSON.stringify([
-      node.id,
-      node.url || node.slug || node.title,
-      node.price || node.totalPrice,
-    ]);
-    if (!seen.has(key)) {
-      seen.add(key);
+    const uniqueKey = String(node.url || node.slug || node.id || node.title).trim();
+    if (uniqueKey && !seen.has(uniqueKey)) {
+      seen.add(uniqueKey);
       results.push(node);
     }
   }
@@ -314,7 +306,7 @@ function passesBusinessRules(listing) {
   return pricePerSqm < MAX_PRICE_PER_SQM;
 }
 
-// Curățăm textul pentru a nu strica tag-urile HTML specifice Telegram
+// Protecție specială pentru caracterele rezervate în HTML specifice Telegram (<, >, &)
 function escapeHtml(text) {
   return String(text)
     .replace(/&/g, '&amp;')
@@ -329,7 +321,6 @@ function formatPrice(num) {
 function buildAlertMessage(listing) {
   const pricePerSqm = listing.price / listing.surface;
 
-  // Re-introducem link-ul curat pe textul "Vezi anunțul", acum complet protejat prin formatarea HTML
   return [
     '🏢 <b>Oportunitate imobiliară!</b>',
     '',
@@ -345,9 +336,7 @@ function buildAlertMessage(listing) {
 
 async function fetchHtml(url) {
   const response = await http.get(url, {
-    headers: {
-      Referer: new URL(url).origin,
-    },
+    headers: { Referer: new URL(url).origin },
   });
   return response.data;
 }
@@ -356,7 +345,6 @@ function parseNextData(html) {
   const $ = cheerio.load(html);
   const script = $('#__NEXT_DATA__').html();
   if (!script) return null;
-
   try {
     return JSON.parse(script);
   } catch {
@@ -378,11 +366,7 @@ function parseJsonLdListings(html, meta) {
           for (const item of node.itemListElement) {
             const offer = item.item || item;
             const price = extractPriceFromObject(offer.offers?.price || offer.offers);
-            const surface = extractSurfaceFromText(
-              offer.description,
-              offer.name,
-              JSON.stringify(offer),
-            );
+            const surface = extractSurfaceFromText(offer.description, offer.name, JSON.stringify(offer));
             const normalized = normalizeRawListing(
               {
                 title: offer.name,
@@ -562,7 +546,6 @@ async function scrapeTarget(target) {
 }
 
 async function sendTelegramAlert(bot, chatId, listing) {
-  // Schimbat parse_mode în HTML pentru stabilitate maximă
   await bot.sendMessage(chatId, buildAlertMessage(listing), {
     parse_mode: 'HTML',
     disable_web_page_preview: false,
