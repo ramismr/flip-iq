@@ -3,7 +3,6 @@
 const axios = require('axios');
 const cheerio = require('cheerio');
 const TelegramBot = require('node-telegram-bot-api');
-const httpModule = require('http');
 
 const PRICE_MIN = 20000;
 const PRICE_MAX = 32000;
@@ -306,7 +305,8 @@ function escapeTelegramMarkdown(text) {
 }
 
 function escapeTelegramUrl(url) {
-  return String(url).replace(/[)\\]/g, '\\$&');
+  // Escapează TOATE caracterele speciale din URL cerute de MarkdownV2, inclusiv parantezele pătrate specifice Storia
+  return String(url).replace(/([_ *[\]()~`>#+\-=|{}.!\\])/g, '\\$1');
 }
 
 function formatPrice(num) {
@@ -378,7 +378,7 @@ function parseJsonLdListings(html, meta) {
                 surface,
                 description: offer.description,
               },
-              node,
+              meta,
             );
             if (normalized) listings.push(normalized);
           }
@@ -460,7 +460,7 @@ async function scrapeOlx(target) {
         if (offers.length < params.limit) break;
         await sleep(400);
       } catch (error) {
-        console.warn(`[OLX API] Eroare la pagina ${page + 1}: ${error.message}. Trecem la citirea HTML.`);
+        console.warn(`[OLX API] Eroare: ${error.message}. Trecem direct la citirea HTML.`);
         useFallback = true;
         break;
       }
@@ -486,7 +486,7 @@ async function scrapeOlx(target) {
       }
     }
   } catch (err) {
-    console.error(`[OLX HTML Fallback] Eroare totală la preluarea datelor: ${err.message}`);
+    console.error(`[OLX HTML Fallback] Eroare la preluarea datelor: ${err.message}`);
   }
 
   return listings;
@@ -662,13 +662,6 @@ async function main() {
   const matches = allListings.filter(passesBusinessRules);
   console.log(`\n✅ ${matches.length} anunțuri trec filtrele de business.`);
 
-  for (const listing of matches) {
-    const ppm = Math.round(listing.price / listing.surface);
-    console.log(
-      `  • [${listing.platform}] ${listing.title.slice(0, 60)} – ${listing.price} € / ${listing.surface} m² (${ppm} €/m²)`,
-    );
-  }
-
   const token = process.env.TELEGRAM_TOKEN;
   const chatId = process.env.CHAT_ID;
 
@@ -710,15 +703,6 @@ async function runScrapeCycle() {
     isRunning = false;
   }
 }
-
-// Pornire Server HTTP dummy pentru Render ca să păstreze aplicația activă
-const PORT = process.env.PORT || 10000;
-httpModule.createServer((req, res) => {
-  res.writeHead(200, { 'Content-Type': 'text/plain' });
-  res.end('FlipIQ Scraper is running active.\n');
-}).listen(PORT, () => {
-  console.log(`Server de menținere pornit pe portul ${PORT}`);
-});
 
 console.log(`FlipIQ Scraper pornit – rulare la fiecare ${SCRAPE_INTERVAL_MS / 60000} minute.`);
 runScrapeCycle();
