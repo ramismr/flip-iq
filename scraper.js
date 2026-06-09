@@ -3,6 +3,7 @@
 const axios = require('axios');
 const cheerio = require('cheerio');
 const TelegramBot = require('node-telegram-bot-api');
+const httpModule = require('http');
 
 const PRICE_MIN = 20000;
 const PRICE_MAX = 32000;
@@ -377,14 +378,14 @@ function parseJsonLdListings(html, meta) {
                 surface,
                 description: offer.description,
               },
-              meta,
+              node,
             );
             if (normalized) listings.push(normalized);
           }
         }
       }
     } catch {
-      // ignore malformed JSON-LD blocks
+      // ignore
     }
   });
 
@@ -415,67 +416,77 @@ async function scrapeOlx(target) {
   const listings = [];
   const seen = new Set();
 
+  let useFallback = false;
   const apiParams = await resolveOlxApiParams(target.url);
-  const params = {
-    offset: 0,
-    limit: 50,
-    sort_by: 'created_at:desc',
-    ...(apiParams || {}),
-  };
+  
+  if (apiParams) {
+    const params = {
+      offset: 0,
+      limit: 50,
+      sort_by: 'created_at:desc',
+      ...apiParams,
+    };
 
-  for (let page = 0; page < 3; page += 1) {
-    params.offset = page * params.limit;
+    for (let page = 0; page < 3; page += 1) {
+      params.offset = page * params.limit;
+      try {
+        const { data } = await http.get('https://www.olx.ro/api/v1/offers/', {
+          params,
+          headers: { Referer: target.url },
+        });
 
-    try {
-      const { data } = await http.get('https://www.olx.ro/api/v1/offers/', {
-        params,
-        headers: { Referer: target.url },
-      });
+        const offers = data?.data || [];
+        if (!offers.length) break;
 
-      const offers = data?.data || [];
-      if (!offers.length) break;
+        for (const offer of offers) {
+          const normalized = normalizeRawListing(
+            {
+              id: offer.id,
+              title: offer.title,
+              url: offer.url,
+              price: OLX_PARAMS_PRICE(offer.params) || offer.promotion?.price,
+              params: offer.params,
+              description: offer.description,
+            },
+            meta,
+          );
 
-      for (const offer of offers) {
-        const normalized = normalizeRawListing(
-          {
-            id: offer.id,
-            title: offer.title,
-            url: offer.url,
-            price: OLX_PARAMS_PRICE(offer.params) || offer.promotion?.price,
-            params: offer.params,
-            description: offer.description,
-          },
-          meta,
-        );
-
-        if (normalized && !seen.has(normalized.url)) {
-          seen.add(normalized.url);
-          listings.push(normalized);
+          if (normalized && !seen.has(normalized.url)) {
+            seen.add(normalized.url);
+            listings.push(normalized);
+          }
         }
-      }
 
-      if (offers.length < params.limit) break;
-      await sleep(400);
-    } catch (error) {
-      console.warn(`[OLX] Eroare la pagina ${page + 1}: ${error.message}`);
-      break;
+        if (offers.length < params.limit) break;
+        await sleep(400);
+      } catch (error) {
+        console.warn(`[OLX API] Eroare la pagina ${page + 1}: ${error.message}. Trecem la citirea HTML.`);
+        useFallback = true;
+        break;
+      }
     }
+  } else {
+    useFallback = true;
   }
 
-  if (listings.length) return listings;
+  if (listings.length && !useFallback) return listings;
 
-  const html = await fetchHtml(target.url);
-  const nextData = parseNextData(html);
-  const raw = [];
-  const jsonSeen = new Set();
-  if (nextData) collectListingsFromJson(nextData, raw, jsonSeen);
+  try {
+    const html = await fetchHtml(target.url);
+    const nextData = parseNextData(html);
+    const raw = [];
+    const jsonSeen = new Set();
+    if (nextData) collectListingsFromJson(nextData, raw, jsonSeen);
 
-  for (const item of raw) {
-    const normalized = normalizeRawListing(item, meta);
-    if (normalized && !seen.has(normalized.url)) {
-      seen.add(normalized.url);
-      listings.push(normalized);
+    for (const item of raw) {
+      const normalized = normalizeRawListing(item, meta);
+      if (normalized && !seen.has(normalized.url)) {
+        seen.add(normalized.url);
+        listings.push(normalized);
+      }
     }
+  } catch (err) {
+    console.error(`[OLX HTML Fallback] Eroare totală la preluarea datelor: ${err.message}`);
   }
 
   return listings;
@@ -486,47 +497,50 @@ async function scrapeStoria(target) {
   const listings = [];
   const seen = new Set();
 
-  const html = await fetchHtml(target.url);
-  const nextData = parseNextData(html);
-  const raw = [];
-  const jsonSeen = new Set();
+  try {
+    const html = await fetchHtml(target.url);
+    const nextData = parseNextData(html);
+    const raw = [];
+    const jsonSeen = new Set();
 
-  if (nextData) collectListingsFromJson(nextData, raw, jsonSeen);
+    if (nextData) collectListingsFromJson(nextData, raw, jsonSeen);
 
-  for (const item of raw) {
-    const normalized = normalizeRawListing(item, meta);
-    if (normalized && !seen.has(normalized.url)) {
-      seen.add(normalized.url);
-      listings.push(normalized);
+    for (const item of raw) {
+      const normalized = normalizeRawListing(item, meta);
+      if (normalized && !seen.has(normalized.url)) {
+        seen.add(normalized.url);
+        listings.push(normalized);
+      }
     }
+
+    if (listings.length) return listings;
+
+    const $ = cheerio.load(html);
+    $('a[href*="/oferta/"], a[href*="/ro/oferta/"]').each((_, el) => {
+      const href = $(el).attr('href');
+      const card = $(el).closest('article, li, div').first();
+      const cardText = card.text() || $(el).text();
+      const title = $(el).attr('title') || $(el).text().trim();
+
+      const normalized = normalizeRawListing(
+        {
+          title,
+          url: href,
+          price: extractPriceEur(cardText),
+          surface: extractSurfaceFromText(cardText, title),
+          description: cardText,
+        },
+        meta,
+      );
+
+      if (normalized && !seen.has(normalized.url)) {
+        seen.add(normalized.url);
+        listings.push(normalized);
+      }
+    });
+  } catch (err) {
+    console.error(`[Storia] Eroare la scanare: ${err.message}`);
   }
-
-  if (listings.length) return listings;
-
-  const $ = cheerio.load(html);
-
-  $('a[href*="/oferta/"], a[href*="/ro/oferta/"]').each((_, el) => {
-    const href = $(el).attr('href');
-    const card = $(el).closest('article, li, div').first();
-    const cardText = card.text() || $(el).text();
-    const title = $(el).attr('title') || $(el).text().trim();
-
-    const normalized = normalizeRawListing(
-      {
-        title,
-        url: href,
-        price: extractPriceEur(cardText),
-        surface: extractSurfaceFromText(cardText, title),
-        description: cardText,
-      },
-      meta,
-    );
-
-    if (normalized && !seen.has(normalized.url)) {
-      seen.add(normalized.url);
-      listings.push(normalized);
-    }
-  });
 
   return listings;
 }
@@ -536,67 +550,70 @@ async function scrapeImobiliare(target) {
   const listings = [];
   const seen = new Set();
 
-  const html = await fetchHtml(target.url);
-  const jsonLdListings = parseJsonLdListings(html, meta);
+  try {
+    const html = await fetchHtml(target.url);
+    const jsonLdListings = parseJsonLdListings(html, meta);
 
-  for (const listing of jsonLdListings) {
-    if (!seen.has(listing.url)) {
-      seen.add(listing.url);
-      listings.push(listing);
+    for (const listing of jsonLdListings) {
+      if (!seen.has(listing.url)) {
+        seen.add(listing.url);
+        listings.push(listing);
+      }
     }
-  }
 
-  const $ = cheerio.load(html);
+    const $ = cheerio.load(html);
+    $('a[href*="imobiliare.ro"]').each((_, el) => {
+      const href = $(el).attr('href') || '';
+      if (!/\/vanzare-|\/oferta\/|\/proprietate\//i.test(href)) return;
 
-  $('a[href*="imobiliare.ro"]').each((_, el) => {
-    const href = $(el).attr('href') || '';
-    if (!/\/vanzare-|\/oferta\/|\/proprietate\//i.test(href)) return;
+      const card = $(el).closest('article, [class*="card"], [class*="listing"], li, div').first();
+      const cardText = card.text() || '';
+      const title =
+        $(el).find('h2, h3, [class*="title"]').first().text().trim() ||
+        $(el).attr('title') ||
+        $(el).text().trim();
 
-    const card = $(el).closest('article, [class*="card"], [class*="listing"], li, div').first();
-    const cardText = card.text() || '';
-    const title =
-      $(el).find('h2, h3, [class*="title"]').first().text().trim() ||
-      $(el).attr('title') ||
-      $(el).text().trim();
+      if (!title || title.length < 8) return;
 
-    if (!title || title.length < 8) return;
+      const normalized = normalizeRawListing(
+        {
+          title,
+          url: href,
+          price: extractPriceEur(cardText, title),
+          surface: extractSurfaceFromText(cardText, title),
+          description: cardText,
+        },
+        meta,
+      );
 
-    const normalized = normalizeRawListing(
-      {
-        title,
-        url: href,
-        price: extractPriceEur(cardText, title),
-        surface: extractSurfaceFromText(cardText, title),
-        description: cardText,
-      },
-      meta,
-    );
+      if (normalized && !seen.has(normalized.url)) {
+        seen.add(normalized.url);
+        listings.push(normalized);
+      }
+    });
 
-    if (normalized && !seen.has(normalized.url)) {
-      seen.add(normalized.url);
-      listings.push(normalized);
+    const blockPattern =
+      /href="(https?:\/\/www\.imobiliare\.ro\/[^"]+)"[^>]*>[\s\S]{0,2500}?([\d\s.,]+)\s*€[\s\S]{0,800}?(\d+(?:[.,]\d+)?)\s*mp/gi;
+
+    let match;
+    while ((match = blockPattern.exec(html)) !== null) {
+      const normalized = normalizeRawListing(
+        {
+          title: match[1].split('/').pop().replace(/-/g, ' '),
+          url: match[1],
+          price: parseNumber(match[2]),
+          surface: parseNumber(match[3]),
+        },
+        meta,
+      );
+
+      if (normalized && !seen.has(normalized.url)) {
+        seen.add(normalized.url);
+        listings.push(normalized);
+      }
     }
-  });
-
-  const blockPattern =
-    /href="(https?:\/\/www\.imobiliare\.ro\/[^"]+)"[^>]*>[\s\S]{0,2500}?([\d\s.,]+)\s*€[\s\S]{0,800}?(\d+(?:[.,]\d+)?)\s*mp/gi;
-
-  let match;
-  while ((match = blockPattern.exec(html)) !== null) {
-    const normalized = normalizeRawListing(
-      {
-        title: match[1].split('/').pop().replace(/-/g, ' '),
-        url: match[1],
-        price: parseNumber(match[2]),
-        surface: parseNumber(match[3]),
-      },
-      meta,
-    );
-
-    if (normalized && !seen.has(normalized.url)) {
-      seen.add(normalized.url);
-      listings.push(normalized);
-    }
+  } catch (err) {
+    console.error(`[Imobiliare] Eroare la scanare: ${err.message}`);
   }
 
   return listings;
@@ -604,7 +621,6 @@ async function scrapeImobiliare(target) {
 
 async function scrapeTarget(target) {
   console.log(`\n[${target.platform}] Căutare ${target.location}...`);
-
   if (target.platform === 'OLX') return scrapeOlx(target);
   if (target.platform === 'Storia') return scrapeStoria(target);
   return scrapeImobiliare(target);
@@ -640,8 +656,7 @@ async function main() {
     } catch (error) {
       console.error(`[${target.platform}] ${target.location} – eroare: ${error.message}`);
     }
-
-    await sleep(600);
+    await sleep(1000);
   }
 
   const matches = allListings.filter(passesBusinessRules);
@@ -666,7 +681,7 @@ async function main() {
       try {
         await sendTelegramAlert(bot, chatId, listing);
         console.log(`📨 Alertă trimisă: ${listing.url}`);
-        await sleep(500);
+        await sleep(1000);
       } catch (error) {
         console.error(`Eroare Telegram pentru ${listing.url}: ${error.message}`);
       }
@@ -695,6 +710,15 @@ async function runScrapeCycle() {
     isRunning = false;
   }
 }
+
+// Pornire Server HTTP dummy pentru Render ca să păstreze aplicația activă
+const PORT = process.env.PORT || 10000;
+httpModule.createServer((req, res) => {
+  res.writeHead(200, { 'Content-Type': 'text/plain' });
+  res.end('FlipIQ Scraper is running active.\n');
+}).listen(PORT, () => {
+  console.log(`Server de menținere pornit pe portul ${PORT}`);
+});
 
 console.log(`FlipIQ Scraper pornit – rulare la fiecare ${SCRAPE_INTERVAL_MS / 60000} minute.`);
 runScrapeCycle();
