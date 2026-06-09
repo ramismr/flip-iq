@@ -12,8 +12,31 @@ const SCRAPE_INTERVAL_MS = 10 * 60 * 1000;
 const CONSTANTA_CENTER = { lat: 44.1733, lng: 28.6383 };
 const RADIUS_KM = 40;
 
-const USER_AGENT =
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
+const USER_AGENT_PROFILES = [
+  {
+    ua: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+    secChUa: '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+    platform: '"Windows"',
+  },
+  {
+    ua: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36 Edg/130.0.0.0',
+    secChUa: '"Microsoft Edge";v="130", "Chromium";v="130", "Not_A Brand";v="24"',
+    platform: '"Windows"',
+  },
+  {
+    ua: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:133.0) Gecko/20100101 Firefox/133.0',
+    firefox: true,
+  },
+  {
+    ua: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+    secChUa: '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+    platform: '"macOS"',
+  },
+];
+
+const DELAY_MIN_MS = 5000;
+const DELAY_MAX_MS = 10000;
+const GOOGLE_REFERER = 'https://www.google.com/';
 
 const PLATFORM_ORIGIN = {
   OLX: 'https://www.olx.ro',
@@ -62,22 +85,56 @@ const SEARCH_TARGETS = [
 
 const HTTP_TIMEOUT_MS = 90000;
 const HTTP_MAX_RETRIES = 3;
-const HTTP_RETRY_BASE_MS = 5000;
 
 const http = axios.create({
   timeout: HTTP_TIMEOUT_MS,
-  headers: {
-    'User-Agent': USER_AGENT,
-    Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-    'Accept-Language': 'ro-RO,ro;q=0.9,en-US;q=0.8,en;q=0.7',
-    'Accept-Encoding': 'gzip, deflate, br',
-    'Cache-Control': 'no-cache',
-    Pragma: 'no-cache',
-  },
 });
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function pickUserAgentProfile() {
+  return USER_AGENT_PROFILES[Math.floor(Math.random() * USER_AGENT_PROFILES.length)];
+}
+
+function buildBrowserHeaders(extra = {}) {
+  const profile = pickUserAgentProfile();
+  const isApi = extra.Accept?.includes('application/json');
+
+  const headers = {
+    'User-Agent': profile.ua,
+    Accept: isApi
+      ? 'application/json, text/plain, */*'
+      : 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+    'Accept-Language': 'ro-RO,ro;q=0.9,en-US;q=0.8,en;q=0.7',
+    'Accept-Encoding': 'gzip, deflate, br',
+    Referer: GOOGLE_REFERER,
+    'Cache-Control': 'no-cache',
+    Pragma: 'no-cache',
+    Connection: 'keep-alive',
+    'Upgrade-Insecure-Requests': '1',
+    DNT: '1',
+    ...extra,
+  };
+
+  if (!profile.firefox) {
+    headers['Sec-Fetch-Dest'] = extra['Sec-Fetch-Dest'] || (isApi ? 'empty' : 'document');
+    headers['Sec-Fetch-Mode'] = extra['Sec-Fetch-Mode'] || (isApi ? 'cors' : 'navigate');
+    headers['Sec-Fetch-Site'] = extra['Sec-Fetch-Site'] || 'cross-site';
+    if (!isApi) headers['Sec-Fetch-User'] = '?1';
+    headers['Sec-CH-UA'] = profile.secChUa;
+    headers['Sec-CH-UA-Mobile'] = '?0';
+    headers['Sec-CH-UA-Platform'] = profile.platform;
+  }
+
+  return headers;
+}
+
+async function randomDelay(min = DELAY_MIN_MS, max = DELAY_MAX_MS) {
+  const ms = min + Math.floor(Math.random() * (max - min + 1));
+  console.log(`[Anti-bot] Pauză ${(ms / 1000).toFixed(1)}s înainte de următoarea cerere...`);
+  await sleep(ms);
 }
 
 function isRetryableHttpError(error) {
@@ -87,6 +144,7 @@ function isRetryableHttpError(error) {
     code === 'ECONNABORTED' ||
     code === 'ETIMEDOUT' ||
     code === 'ECONNRESET' ||
+    status === 403 ||
     status === 522 ||
     status === 503 ||
     status === 502 ||
@@ -99,7 +157,8 @@ async function fetchWithRetry(config, label = 'request') {
 
   for (let attempt = 1; attempt <= HTTP_MAX_RETRIES; attempt += 1) {
     try {
-      return await http.request(config);
+      const headers = buildBrowserHeaders(config.headers || {});
+      return await http.request({ ...config, headers });
     } catch (error) {
       lastError = error;
       const retryable = isRetryableHttpError(error);
@@ -110,11 +169,10 @@ async function fetchWithRetry(config, label = 'request') {
         throw error;
       }
 
-      const delay = HTTP_RETRY_BASE_MS * attempt;
       console.warn(
-        `[HTTP] ${label} – ${detail} – reîncerc ${attempt}/${HTTP_MAX_RETRIES} în ${delay / 1000}s...`,
+        `[HTTP] ${label} – ${detail} – reîncerc ${attempt}/${HTTP_MAX_RETRIES} cu alt User-Agent...`,
       );
-      await sleep(delay);
+      await randomDelay(DELAY_MIN_MS, DELAY_MAX_MS);
     }
   }
 
@@ -653,13 +711,11 @@ function buildAlertMessage(listing) {
 }
 
 async function fetchHtml(url) {
+  await randomDelay();
   const response = await fetchWithRetry(
     {
       method: 'get',
       url,
-      headers: {
-        Referer: new URL(url).origin,
-      },
     },
     `HTML ${new URL(url).hostname}`,
   );
@@ -726,12 +782,16 @@ async function resolveOlxApiParams(searchUrl) {
   const pathKey = parsed.pathname.replace(/^\/|\/$/g, '').replace(/\//g, ',');
 
   try {
+    await randomDelay();
     const response = await fetchWithRetry(
       {
         method: 'get',
         url: `https://www.olx.ro/api/v1/friendly-links/query-params/${pathKey}/`,
         params: Object.fromEntries(parsed.searchParams),
-        headers: { Referer: searchUrl },
+        headers: {
+          Accept: 'application/json',
+          'Sec-Fetch-Site': 'same-origin',
+        },
       },
       'OLX friendly-links',
     );
@@ -742,65 +802,8 @@ async function resolveOlxApiParams(searchUrl) {
   }
 }
 
-async function scrapeOlx(target) {
+async function scrapeOlxFromHtml(target, listings, seen) {
   const meta = { platform: target.platform, location: target.location, baseUrl: target.url };
-  const listings = [];
-  const seen = new Set();
-
-  const apiParams = await resolveOlxApiParams(target.url);
-  const params = {
-    offset: 0,
-    limit: 50,
-    sort_by: 'created_at:desc',
-    ...(apiParams || {}),
-  };
-
-  for (let page = 0; page < 3; page += 1) {
-    params.offset = page * params.limit;
-
-    try {
-      const response = await fetchWithRetry(
-        {
-          method: 'get',
-          url: 'https://www.olx.ro/api/v1/offers/',
-          params,
-          headers: { Referer: target.url },
-        },
-        `OLX offers p${page + 1}`,
-      );
-
-      const offers = response.data?.data || [];
-      if (!offers.length) break;
-
-      for (const offer of offers) {
-        const normalized = normalizeRawListing(
-          {
-            id: offer.id,
-            slug: offer.slug,
-            title: offer.title,
-            url: offer.url,
-            link: offer.link,
-            price: OLX_PARAMS_PRICE(offer.params) || offer.promotion?.price,
-            params: offer.params,
-            description: offer.description,
-            location: offer.location,
-            map: offer.map,
-          },
-          meta,
-        );
-
-        addListing(listings, seen, normalized);
-      }
-
-      if (offers.length < params.limit) break;
-      await sleep(400);
-    } catch (error) {
-      console.warn(`[OLX] Eroare la pagina ${page + 1}: ${error.message}`);
-      break;
-    }
-  }
-
-  if (listings.length) return listings;
 
   const html = await fetchHtml(target.url);
   const $ = cheerio.load(html);
@@ -837,6 +840,85 @@ async function scrapeOlx(target) {
     addListing(listings, seen, normalizeRawListing(item, meta));
   }
 
+  return listings;
+}
+
+async function scrapeOlxFromApi(target, listings, seen) {
+  const meta = { platform: target.platform, location: target.location, baseUrl: target.url };
+
+  const apiParams = await resolveOlxApiParams(target.url);
+  const params = {
+    offset: 0,
+    limit: 50,
+    sort_by: 'created_at:desc',
+    ...(apiParams || {}),
+  };
+
+  for (let page = 0; page < 3; page += 1) {
+    params.offset = page * params.limit;
+
+    try {
+      if (page > 0) await randomDelay();
+      const response = await fetchWithRetry(
+        {
+          method: 'get',
+          url: 'https://www.olx.ro/api/v1/offers/',
+          params,
+          headers: {
+            Accept: 'application/json',
+            'Sec-Fetch-Site': 'same-origin',
+          },
+        },
+        `OLX offers p${page + 1}`,
+      );
+
+      const offers = response.data?.data || [];
+      if (!offers.length) break;
+
+      for (const offer of offers) {
+        addListing(
+          listings,
+          seen,
+          normalizeRawListing(
+            {
+              id: offer.id,
+              slug: offer.slug,
+              title: offer.title,
+              url: offer.url,
+              link: offer.link,
+              price: OLX_PARAMS_PRICE(offer.params) || offer.promotion?.price,
+              params: offer.params,
+              description: offer.description,
+              location: offer.location,
+              map: offer.map,
+            },
+            meta,
+          ),
+        );
+      }
+
+      if (offers.length < params.limit) break;
+    } catch (error) {
+      console.warn(`[OLX] API pagina ${page + 1}: ${error.message}`);
+      break;
+    }
+  }
+
+  return listings;
+}
+
+async function scrapeOlx(target) {
+  const listings = [];
+  const seen = new Set();
+
+  await scrapeOlxFromHtml(target, listings, seen);
+  if (listings.length) {
+    console.log(`[OLX] ${target.location}: ${listings.length} anunțuri (HTML)`);
+    return listings;
+  }
+
+  console.log(`[OLX] ${target.location}: HTML gol, încerc API...`);
+  await scrapeOlxFromApi(target, listings, seen);
   return listings;
 }
 
@@ -966,6 +1048,7 @@ async function scrapeImobiliare(target) {
 
 async function scrapeTarget(target) {
   console.log(`\n[${target.platform}] Căutare ${target.location}...`);
+  await randomDelay();
 
   if (target.platform === 'OLX') return scrapeOlx(target);
   if (target.platform === 'Storia') return scrapeStoria(target);
@@ -982,7 +1065,10 @@ async function sendTelegramAlert(bot, chatId, listing) {
 async function main() {
   console.log('=== FlipIQ Scraper Imobiliar ===');
   console.log(`Filtru preț: ${PRICE_MIN} – ${PRICE_MAX} €`);
-  console.log(`Filtru rază: ${RADIUS_KM} km de centrul Constanței\n`);
+  console.log(`Filtru rază: ${RADIUS_KM} km de centrul Constanței`);
+  console.log(`Anti-bot: UA rotation, Referer Google, delay ${DELAY_MIN_MS / 1000}–${DELAY_MAX_MS / 1000}s\n`);
+
+  await randomDelay();
 
   const allListings = [];
   const globalSeen = new Set();
@@ -1003,7 +1089,7 @@ async function main() {
       console.error(`[${target.platform}] ${target.location} – eroare: ${error.message}`);
     }
 
-    await sleep(1500);
+    await randomDelay();
   }
 
   const inPriceRange = allListings.filter(
