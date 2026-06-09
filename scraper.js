@@ -1,8 +1,22 @@
 'use strict';
 
+const express = require('express');
 const axios = require('axios');
 const cheerio = require('cheerio');
 const TelegramBot = require('node-telegram-bot-api');
+
+// --- SERVER WEB MINIMAL PENTRU RENDER (GRATIS) ---
+const app = express();
+const PORT = process.env.PORT || 10000;
+
+app.get('/', (req, res) => {
+  res.send('FlipIQ Scraper is running successfully!');
+});
+
+app.listen(PORT, () => {
+  console.log(`[Render] Server dummy pornit pe portul ${PORT}`);
+});
+// --------------------------------------------------
 
 const PRICE_MIN = 20000;
 const PRICE_MAX = 32000;
@@ -305,7 +319,6 @@ function escapeTelegramMarkdown(text) {
 }
 
 function escapeTelegramUrl(url) {
-  // Escapează TOATE caracterele speciale din URL cerute de MarkdownV2, inclusiv parantezele pătrate specifice Storia
   return String(url).replace(/([_ *[\]()~`>#+\-=|{}.!\\])/g, '\\$1');
 }
 
@@ -447,11 +460,11 @@ async function scrapeOlx(target) {
               price: OLX_PARAMS_PRICE(offer.params) || offer.promotion?.price,
               params: offer.params,
               description: offer.description,
-            },
-            meta,
-          );
+          },
+          meta,
+        );
 
-          if (normalized && !seen.has(normalized.url)) {
+        if (normalized && !seen.has(normalized.url)) {
             seen.add(normalized.url);
             listings.push(normalized);
           }
@@ -460,7 +473,7 @@ async function scrapeOlx(target) {
         if (offers.length < params.limit) break;
         await sleep(400);
       } catch (error) {
-        console.warn(`[OLX API] Eroare: ${error.message}. Trecem direct la citirea HTML.`);
+        console.warn(`[OLX API] Eroare: ${error.message}. Fallback la HTML.`);
         useFallback = true;
         break;
       }
@@ -486,7 +499,7 @@ async function scrapeOlx(target) {
       }
     }
   } catch (err) {
-    console.error(`[OLX HTML Fallback] Eroare la preluarea datelor: ${err.message}`);
+    console.error(`[OLX Fallback] Eroare: ${err.message}`);
   }
 
   return listings;
@@ -512,34 +525,8 @@ async function scrapeStoria(target) {
         listings.push(normalized);
       }
     }
-
-    if (listings.length) return listings;
-
-    const $ = cheerio.load(html);
-    $('a[href*="/oferta/"], a[href*="/ro/oferta/"]').each((_, el) => {
-      const href = $(el).attr('href');
-      const card = $(el).closest('article, li, div').first();
-      const cardText = card.text() || $(el).text();
-      const title = $(el).attr('title') || $(el).text().trim();
-
-      const normalized = normalizeRawListing(
-        {
-          title,
-          url: href,
-          price: extractPriceEur(cardText),
-          surface: extractSurfaceFromText(cardText, title),
-          description: cardText,
-        },
-        meta,
-      );
-
-      if (normalized && !seen.has(normalized.url)) {
-        seen.add(normalized.url);
-        listings.push(normalized);
-      }
-    });
   } catch (err) {
-    console.error(`[Storia] Eroare la scanare: ${err.message}`);
+    console.error(`[Storia] Eroare: ${err.message}`);
   }
 
   return listings;
@@ -560,60 +547,8 @@ async function scrapeImobiliare(target) {
         listings.push(listing);
       }
     }
-
-    const $ = cheerio.load(html);
-    $('a[href*="imobiliare.ro"]').each((_, el) => {
-      const href = $(el).attr('href') || '';
-      if (!/\/vanzare-|\/oferta\/|\/proprietate\//i.test(href)) return;
-
-      const card = $(el).closest('article, [class*="card"], [class*="listing"], li, div').first();
-      const cardText = card.text() || '';
-      const title =
-        $(el).find('h2, h3, [class*="title"]').first().text().trim() ||
-        $(el).attr('title') ||
-        $(el).text().trim();
-
-      if (!title || title.length < 8) return;
-
-      const normalized = normalizeRawListing(
-        {
-          title,
-          url: href,
-          price: extractPriceEur(cardText, title),
-          surface: extractSurfaceFromText(cardText, title),
-          description: cardText,
-        },
-        meta,
-      );
-
-      if (normalized && !seen.has(normalized.url)) {
-        seen.add(normalized.url);
-        listings.push(normalized);
-      }
-    });
-
-    const blockPattern =
-      /href="(https?:\/\/www\.imobiliare\.ro\/[^"]+)"[^>]*>[\s\S]{0,2500}?([\d\s.,]+)\s*€[\s\S]{0,800}?(\d+(?:[.,]\d+)?)\s*mp/gi;
-
-    let match;
-    while ((match = blockPattern.exec(html)) !== null) {
-      const normalized = normalizeRawListing(
-        {
-          title: match[1].split('/').pop().replace(/-/g, ' '),
-          url: match[1],
-          price: parseNumber(match[2]),
-          surface: parseNumber(match[3]),
-        },
-        meta,
-      );
-
-      if (normalized && !seen.has(normalized.url)) {
-        seen.add(normalized.url);
-        listings.push(normalized);
-      }
-    }
   } catch (err) {
-    console.error(`[Imobiliare] Eroare la scanare: ${err.message}`);
+    console.error(`[Imobiliare] Eroare: ${err.message}`);
   }
 
   return listings;
@@ -635,9 +570,7 @@ async function sendTelegramAlert(bot, chatId, listing) {
 
 async function main() {
   console.log('=== FlipIQ Scraper Imobiliar ===');
-  console.log(`Filtru preț: ${PRICE_MIN} – ${PRICE_MAX} €`);
-  console.log(`Filtru randament: sub ${MAX_PRICE_PER_SQM} €/m²\n`);
-
+  
   const allListings = [];
   const globalSeen = new Set();
 
@@ -647,14 +580,13 @@ async function main() {
       console.log(`[${target.platform}] ${target.location}: ${results.length} anunțuri găsite`);
 
       for (const listing of results) {
-        const key = listing.url;
-        if (!globalSeen.has(key)) {
-          globalSeen.add(key);
+        if (!globalSeen.has(listing.url)) {
+          globalSeen.add(listing.url);
           allListings.push(listing);
         }
       }
     } catch (error) {
-      console.error(`[${target.platform}] ${target.location} – eroare: ${error.message}`);
+      console.error(`[${target.platform}] Eroare: ${error.message}`);
     }
     await sleep(1000);
   }
@@ -665,9 +597,7 @@ async function main() {
   const token = process.env.TELEGRAM_TOKEN;
   const chatId = process.env.CHAT_ID;
 
-  if (!token || !chatId) {
-    console.warn('\n⚠️ TELEGRAM_TOKEN sau CHAT_ID lipsesc – notificările sunt dezactivate.');
-  } else if (matches.length) {
+  if (matches.length && token && chatId) {
     const bot = new TelegramBot(token, { polling: false });
 
     for (const listing of matches) {
@@ -676,34 +606,26 @@ async function main() {
         console.log(`📨 Alertă trimisă: ${listing.url}`);
         await sleep(1000);
       } catch (error) {
-        console.error(`Eroare Telegram pentru ${listing.url}: ${error.message}`);
+        console.error(`Eroare Telegram: ${error.message}`);
       }
     }
-  } else {
-    console.log('\nNicio oportunitate nouă – nu se trimit alerte.');
   }
 
   console.log('\n=== Ciclu scraper finalizat ===');
 }
 
 let isRunning = false;
-
 async function runScrapeCycle() {
-  if (isRunning) {
-    console.log('Ciclu anterior încă în desfășurare – sărim această rulare.');
-    return;
-  }
-
+  if (isRunning) return;
   isRunning = true;
   try {
     await main();
   } catch (error) {
-    console.error('Eroare în ciclu scraper:', error.message);
+    console.error(error);
   } finally {
     isRunning = false;
   }
 }
 
-console.log(`FlipIQ Scraper pornit – rulare la fiecare ${SCRAPE_INTERVAL_MS / 60000} minute.`);
 runScrapeCycle();
 setInterval(runScrapeCycle, SCRAPE_INTERVAL_MS);
