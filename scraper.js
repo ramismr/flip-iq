@@ -24,26 +24,48 @@ const PLATFORM_ORIGIN = {
 const SEARCH_TARGETS = [
   {
     platform: 'OLX',
-    location: 'Județul Constanța (40 km)',
+    location: 'Constanța',
     url:
-      'https://www.olx.ro/imobiliare/apartamente-garsoniere-de-vanzare/jud-constanta/?search%5Bfilter_float_price:from%5D=20000&search%5Bfilter_float_price:to%5D=32000&search%5Bfilter_enum_currency%5D=eur',
+      'https://www.olx.ro/imobiliare/apartamente-garsoniere-de-vanzare/constanta/?search%5Bfilter_float_price:from%5D=20000&search%5Bfilter_float_price:to%5D=32000&search%5Bfilter_enum_currency%5D=eur',
+  },
+  {
+    platform: 'OLX',
+    location: 'Năvodari',
+    url:
+      'https://www.olx.ro/imobiliare/apartamente-garsoniere-de-vanzare/navodari-jud-constanta/?search%5Bfilter_float_price:from%5D=20000&search%5Bfilter_float_price:to%5D=32000&search%5Bfilter_enum_currency%5D=eur',
   },
   {
     platform: 'Storia',
-    location: 'Județul Constanța (40 km)',
+    location: 'Constanța',
     url:
       'https://www.storia.ro/ro/rezultate/vanzare/apartament/constanta?priceMin=20000&priceMax=32000&currency=EUR',
   },
   {
+    platform: 'Storia',
+    location: 'Năvodari',
+    url:
+      'https://www.storia.ro/ro/rezultate/vanzare/apartament/constanta/navodari?priceMin=20000&priceMax=32000&currency=EUR',
+  },
+  {
     platform: 'Imobiliare.ro',
-    location: 'Județul Constanța (40 km)',
+    location: 'Constanța',
     url:
       'https://www.imobiliare.ro/vanzare-apartamente/constanta?pret-min=20000&pret-max=32000&moneda=EUR',
   },
+  {
+    platform: 'Imobiliare.ro',
+    location: 'Năvodari',
+    url:
+      'https://www.imobiliare.ro/vanzare-apartamente/navodari-constanta?pret-min=20000&pret-max=32000&moneda=EUR',
+  },
 ];
 
+const HTTP_TIMEOUT_MS = 90000;
+const HTTP_MAX_RETRIES = 3;
+const HTTP_RETRY_BASE_MS = 5000;
+
 const http = axios.create({
-  timeout: 30000,
+  timeout: HTTP_TIMEOUT_MS,
   headers: {
     'User-Agent': USER_AGENT,
     Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
@@ -56,6 +78,47 @@ const http = axios.create({
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isRetryableHttpError(error) {
+  const code = error.code;
+  const status = error.response?.status;
+  return (
+    code === 'ECONNABORTED' ||
+    code === 'ETIMEDOUT' ||
+    code === 'ECONNRESET' ||
+    status === 522 ||
+    status === 503 ||
+    status === 502 ||
+    status === 429
+  );
+}
+
+async function fetchWithRetry(config, label = 'request') {
+  let lastError;
+
+  for (let attempt = 1; attempt <= HTTP_MAX_RETRIES; attempt += 1) {
+    try {
+      return await http.request(config);
+    } catch (error) {
+      lastError = error;
+      const retryable = isRetryableHttpError(error);
+      const status = error.response?.status;
+      const detail = status ? `HTTP ${status}` : error.code || error.message;
+
+      if (!retryable || attempt === HTTP_MAX_RETRIES) {
+        throw error;
+      }
+
+      const delay = HTTP_RETRY_BASE_MS * attempt;
+      console.warn(
+        `[HTTP] ${label} – ${detail} – reîncerc ${attempt}/${HTTP_MAX_RETRIES} în ${delay / 1000}s...`,
+      );
+      await sleep(delay);
+    }
+  }
+
+  throw lastError;
 }
 
 function normalizeDiacritics(text) {
@@ -590,11 +653,16 @@ function buildAlertMessage(listing) {
 }
 
 async function fetchHtml(url) {
-  const response = await http.get(url, {
-    headers: {
-      Referer: new URL(url).origin,
+  const response = await fetchWithRetry(
+    {
+      method: 'get',
+      url,
+      headers: {
+        Referer: new URL(url).origin,
+      },
     },
-  });
+    `HTML ${new URL(url).hostname}`,
+  );
   return response.data;
 }
 
@@ -658,14 +726,16 @@ async function resolveOlxApiParams(searchUrl) {
   const pathKey = parsed.pathname.replace(/^\/|\/$/g, '').replace(/\//g, ',');
 
   try {
-    const { data } = await http.get(
-      `https://www.olx.ro/api/v1/friendly-links/query-params/${pathKey}/`,
+    const response = await fetchWithRetry(
       {
+        method: 'get',
+        url: `https://www.olx.ro/api/v1/friendly-links/query-params/${pathKey}/`,
         params: Object.fromEntries(parsed.searchParams),
         headers: { Referer: searchUrl },
       },
+      'OLX friendly-links',
     );
-    return data?.data || null;
+    return response.data?.data || null;
   } catch (error) {
     console.warn(`[OLX] Nu s-au putut rezolva parametrii API: ${error.message}`);
     return null;
@@ -685,16 +755,21 @@ async function scrapeOlx(target) {
     ...(apiParams || {}),
   };
 
-  for (let page = 0; page < 5; page += 1) {
+  for (let page = 0; page < 3; page += 1) {
     params.offset = page * params.limit;
 
     try {
-      const { data } = await http.get('https://www.olx.ro/api/v1/offers/', {
-        params,
-        headers: { Referer: target.url },
-      });
+      const response = await fetchWithRetry(
+        {
+          method: 'get',
+          url: 'https://www.olx.ro/api/v1/offers/',
+          params,
+          headers: { Referer: target.url },
+        },
+        `OLX offers p${page + 1}`,
+      );
 
-      const offers = data?.data || [];
+      const offers = response.data?.data || [];
       if (!offers.length) break;
 
       for (const offer of offers) {
@@ -928,7 +1003,7 @@ async function main() {
       console.error(`[${target.platform}] ${target.location} – eroare: ${error.message}`);
     }
 
-    await sleep(600);
+    await sleep(1500);
   }
 
   const inPriceRange = allListings.filter(
@@ -998,3 +1073,4 @@ async function runScrapeCycle() {
 console.log(`FlipIQ Scraper pornit – rulare la fiecare ${SCRAPE_INTERVAL_MS / 60000} minute.`);
 runScrapeCycle();
 setInterval(runScrapeCycle, SCRAPE_INTERVAL_MS);
+
